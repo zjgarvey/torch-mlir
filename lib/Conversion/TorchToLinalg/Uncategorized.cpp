@@ -209,6 +209,12 @@ createTriangularMatrix(OpBuilder &b, Location loc, ValueRange payloadArgs,
   return success();
 }
 
+static void getZeroPoint(Value value, Value &zeropoint) {
+  if (auto make = value.getDefiningOp<Aten_MakePerTensorQuantizedTensorOp>()) {
+    zeropoint = make.getZeroPoint();
+  }
+}
+
 static Value createLinalgPayloadCalculationForElementwiseOp(
     OpBuilder &b, Location loc, const TypeConverter *converter,
     ValueRange payloadArgs, Operation *op, ArrayRef<Value> operands) {
@@ -443,19 +449,27 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
     return b.create<arith::DivFOp>(loc, one, added);
   }
   if (auto relu = dyn_cast<AtenReluOp>(op)) {
-    if (!relu.getType()
-             .cast<ValueTensorType>()
-             .getDtype()
-             .isa<mlir::FloatType>()) {
-      relu.emitError("unimplemented: non-floating point dtype");
-      return nullptr;
-    }
+    Value zeroPoint;
+    getZeroPoint(relu.getSelf(), zeroPoint);
+    zeroPoint.dump();
     Type elementType = payloadArgs[0].getType();
     Value constZero =
         b.create<arith::ConstantOp>(loc, b.getZeroAttr(elementType));
-    Value pred = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT,
-                                         payloadArgs[0], constZero);
-    return b.create<arith::SelectOp>(loc, pred, payloadArgs[0], constZero);
+    constZero.dump();
+    if (IntegerType intType = elementType.dyn_cast<mlir::IntegerType>()){
+    }
+    Value inputElement = payloadArgs[0];
+    Value pred;
+    if (zeroPoint){
+      zeroPoint = converter->materializeTargetConversion(b, loc, converter->convertType(zeroPoint.getType()), zeroPoint);
+      zeroPoint = b.create<arith::TruncIOp>(
+        loc, inputElement.getType(), zeroPoint);
+      inputElement = b.create<arith::SubIOp>(loc, inputElement, zeroPoint);
+      pred = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, inputElement, constZero);
+    } else {
+      pred = createGreaterThan(b, loc, elementType, inputElement, constZero); 
+    }
+    return b.create<arith::SelectOp>(loc, pred, inputElement, constZero);
   }
   if (auto round = dyn_cast<AtenRoundOp>(op)) {
     if (!round.getType()
@@ -1507,9 +1521,11 @@ public:
     Location loc = op->getLoc();
     auto tensorOperands = llvm::to_vector<6>(llvm::make_filter_range(
         operands, [](Value v) { return v.getType().isa<RankedTensorType>(); }));
-    auto resultType = getTypeConverter()
+    RankedTensorType resultType;
+    resultType = getTypeConverter()->convertType(tensorOperands[0].getType()).cast<RankedTensorType>();
+     /*  resultType = getTypeConverter()
                           ->convertType(op->getResult(0).getType())
-                          .cast<RankedTensorType>();
+                          .cast<RankedTensorType>(); */
     bool hadErrorCreatingPayload = false;
     Value generic = torch_to_linalg::createElementwiseLinalgGeneric(
         rewriter, loc, tensorOperands, resultType.getElementType(),

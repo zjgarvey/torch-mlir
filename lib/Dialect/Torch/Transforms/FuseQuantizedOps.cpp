@@ -28,7 +28,7 @@ public:
   LogicalResult matchAndRewrite(SrcOp op,
                                 PatternRewriter &rewriter) const override {
     llvm::SmallVector<Value> operands(op->getOperands());
-
+    
     bool dequanted = false;
     auto f = [&dequanted](Value operand) {
       if (auto dequant = operand.getDefiningOp<AtenDequantizeTensorOp>()) {
@@ -42,8 +42,9 @@ public:
       return operand;
     };
 
-    operands[0] = f(operands[0]);
-    operands[1] = f(operands[1]);
+    for (unsigned i = 0; i < operands.size(); i++){
+      operands[i] = f(operands[i]);
+    }
 
     if (!dequanted) {
       return rewriter.notifyMatchFailure(op, "no dequantizations found");
@@ -222,6 +223,7 @@ public:
                 RemoveUnused<AtenDequantizeTensorOp>,
                 RemoveUnused<AtenQuantizePerTensorOp>,
                 QuantizeOperands<AtenConvolutionOp>, QuantizeOperands<AtenMmOp>,
+                QuantizeOperands<AtenReluOp>,
                 QuantizeAccumulator<AtenMmOp>, QuantizeBias<AtenConvolutionOp>>(
             context);
 

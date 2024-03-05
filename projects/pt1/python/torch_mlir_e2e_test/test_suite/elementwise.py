@@ -482,6 +482,25 @@ class ElementwiseReluModule(torch.nn.Module):
 def ElementwiseReluModule_basic(module, tu: TestUtils):
     module.forward(tu.rand(4, 2, low=-1))
 
+class ElementwiseInt8ReluModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.int8, True),
+    ])
+    def forward(self, x):
+        qx = torch._make_per_tensor_quantized_tensor(x, 0.1, 8)
+        qx = torch.dequantize(qx)
+        return torch.relu(qx)
+
+
+@register_test_case(module_factory=lambda: ElementwiseInt8ReluModule())
+def ElementwiseInt8ReluModule_basic(module, tu: TestUtils):
+    module.forward(tu.randint(4, 2, low=-1).to(dtype=torch.int8))
 
 # ==============================================================================
 
