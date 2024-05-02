@@ -91,14 +91,46 @@ class Config:
     elide_initialized_inputs: bool = True
 
 
+def shape_into_CoS_shape_inference_helper(model):
+    gi = GraphInfo(None, model.graph)
+    cos_io = []
+    allvimap = gi.declared_input_map
+    allvimap.update(gi.value_info_map)
+    allvimap.update(gi.output_map)
+
+    for n in gi.graph_proto.node:
+        if n.op_type == "ConstantOfShape":
+            cos_io.append((n.input, n.output))
+
+    for i, o in cos_io:
+        for n in gi.graph_proto.node:
+            if n.output == i:
+                if n.op_type == "Shape":
+                    # print(f'found match: Shape -> {i} -> CoS -> {o}')
+                    vi_to_copy_from = allvimap[n.input[0]]
+                else:
+                    vi_to_copy_from = allvimap[o[0]]
+                break
+        for d0, d1 in zip(
+            allvimap[o[0]].type.tensor_type.shape.dim,
+            vi_to_copy_from.type.tensor_type.shape.dim,
+        ):
+            if d0 != d1:
+                d0.ClearField("dim_param")
+                d0.ClearField("dim_value")
+                d0.CopyFrom(d1)
+
+    return onnx.shape_inference.infer_shapes(onnx.helper.make_model(gi.graph_proto))
+
+
 class ModelInfo:
     """Top-level accounting and accessors for an ONNX model."""
 
     def __init__(self, model_proto: onnx.ModelProto, *, config: Config = Config()):
         self.config = config
-        self.model_proto = model_proto
-        assert model_proto.graph, "Model must contain a main Graph"
-        self.main_graph = GraphInfo(self, model_proto.graph)
+        self.model_proto = shape_into_CoS_shape_inference_helper(model_proto)
+        assert self.model_proto.graph, "Model must contain a main Graph"
+        self.main_graph = GraphInfo(self, self.model_proto.graph)
 
     def create_module(self, context: Optional[Context] = None) -> Module:
         if not context:
