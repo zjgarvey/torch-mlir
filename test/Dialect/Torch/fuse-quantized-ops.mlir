@@ -28,6 +28,54 @@ func.func @mm(%arg0: !torch.vtensor<[4, 4],si8>, %arg1: !torch.vtensor<[4, 4],si
 
 // -----
 
+// CHECK-LABEL: @mm_transpose
+func.func @mm_transpose(%arg0: !torch.vtensor<[4, 4],si8>, %arg1: !torch.vtensor<[4, 4],si8>) -> !torch.vtensor<[4, 4],f32> {
+  %scale = torch.constant.float 0.5
+  %false = torch.constant.bool false
+  %zero = torch.constant.int 0
+  %one = torch.constant.int 1
+  %zp = torch.constant.int -128
+  %6 = torch.aten._make_per_tensor_quantized_tensor %arg0, %scale, %one : !torch.vtensor<[4, 4],si8>, !torch.float, !torch.int -> !torch.vtensor<[4, 4],!torch.qint8>
+  %7 = torch.aten.dequantize.tensor %6 : !torch.vtensor<[4, 4],!torch.qint8> -> !torch.vtensor<[4, 4],f32>
+  %12 = torch.aten._make_per_tensor_quantized_tensor %arg1, %scale, %zero : !torch.vtensor<[4, 4],si8>, !torch.float, !torch.int -> !torch.vtensor<[4, 4],!torch.qint8>
+  %13 = torch.aten.dequantize.self %12 : !torch.vtensor<[4, 4],!torch.qint8> -> !torch.vtensor<[4, 4],f32>
+  %14 = torch.aten.transpose.int %13, %zero, %one : !torch.vtensor<[4, 4],f32>, !torch.int, !torch.int -> !torch.vtensor<[4, 4],f32>
+  %16 = torch.aten.mm %7, %14 : !torch.vtensor<[4, 4],f32>, !torch.vtensor<[4, 4],f32> -> !torch.vtensor<[4, 4],f32>
+
+  // CHECK-DAG: %[[QUARTER:.+]] = torch.constant.float 2.500000e-01
+  // CHECK-DAG: %[[HALF:.+]] = torch.constant.float 5.000000e-01
+  // CHECK-DAG: %[[ZERO:.+]] = torch.constant.int 0
+  // CHECK-DAG: %[[ONE:.+]] = torch.constant.int 1
+  // CHECK-DAG: %[[TRANSPOSE:.+]] = torch.aten.transpose.int
+  // CHECK-DAG: %[[QLHS:.+]] = torch.aten._make_per_tensor_quantized_tensor %arg0, %[[HALF:.+]], %[[ONE]] : !torch.vtensor<[4,4],si8>, !torch.float, !torch.int -> !torch.vtensor<[4,4],!torch.qint8>
+  // CHECK-DAG: %[[QRHS:.+]] = torch.aten._make_per_tensor_quantized_tensor %[[TRANSPOSE:.+]], %[[HALF:.+]], %[[ZERO]] : !torch.vtensor<[4,4],si8>, !torch.float, !torch.int -> !torch.vtensor<[4,4],!torch.qint8>
+  // CHECK-DAG: %[[MM:.+]] = torch.aten.mm %[[QLHS]], %[[QRHS]] : !torch.vtensor<[4,4],!torch.qint8>, !torch.vtensor<[4,4],!torch.qint8> -> !torch.vtensor<[4,4],!torch.qint32>
+  // CHECK-DAG: %[[INT:.+]] = torch.aten.int_repr %[[MM]] : !torch.vtensor<[4,4],!torch.qint32> -> !torch.vtensor<[4,4],si32>
+  // CHECK-DAG: %[[QOUT:.+]] = torch.aten._make_per_tensor_quantized_tensor %[[INT]], %[[QUARTER]], %[[ZERO]] : !torch.vtensor<[4,4],si32>, !torch.float, !torch.int -> !torch.vtensor<[4,4],!torch.qint32>
+  // CHECK: %[[OUT:.+]] = torch.aten.dequantize.tensor %[[QOUT]] : !torch.vtensor<[4,4],!torch.qint32> -> !torch.vtensor<[4,4],f32>
+  return %16 : !torch.vtensor<[4, 4],f32>
+}
+
+// -----
+
+// CHECK-LABEL: @mm_half_quantized
+func.func @mm_half_quantized(%arg0: !torch.vtensor<[4, 4],si8>, %arg1: !torch.vtensor<[4, 4],f32>) -> !torch.vtensor<[4, 4],f32> {
+  %scale = torch.constant.float 0.5
+  %one = torch.constant.int 1
+  %6 = torch.aten._make_per_tensor_quantized_tensor %arg0, %scale, %one : !torch.vtensor<[4, 4],si8>, !torch.float, !torch.int -> !torch.vtensor<[4, 4],!torch.qint8>
+  %7 = torch.aten.dequantize.tensor %6 : !torch.vtensor<[4, 4],!torch.qint8> -> !torch.vtensor<[4, 4],f32>
+  %16 = torch.aten.mm %7, %arg1 : !torch.vtensor<[4, 4],f32>, !torch.vtensor<[4, 4],f32> -> !torch.vtensor<[4, 4],f32>
+
+  // CHECK-DAG: %[[HALF:.+]] = torch.constant.float 5.000000e-01
+  // CHECK-DAG: %[[ONE:.+]] = torch.constant.int 1
+  // CHECK-DAG: %[[QLHS:.+]] = torch.aten._make_per_tensor_quantized_tensor %arg0, %[[HALF:.+]], %[[ONE]] : !torch.vtensor<[4,4],si8>, !torch.float, !torch.int -> !torch.vtensor<[4,4],!torch.qint8>
+  // CHECK-DAG: %[[DQLHS:.+]] = torch.aten.dequantize.tensor [[QLHS:.+]]
+  // CHECK-DAG: %[[MM:.+]] = torch.aten.mm %[[DQLHS:.+]], %arg1 : !torch.vtensor<[4,4],f32>, !torch.vtensor<[4,4],f32> -> !torch.vtensor<[4,4],f32>
+  return %16 : !torch.vtensor<[4, 4],f32>
+}
+
+// -----
+
 // CHECK-LABEL: @convolution_bias
 func.func @convolution_bias(%arg0: !torch.vtensor<[1,3,8,8],si8>, %arg1: !torch.vtensor<[3,3,2,2],si8>, %arg2 : !torch.vtensor<[3], f32>) -> !torch.vtensor<[1,3,7,7],f32> {
   %scale = torch.constant.float 0.5

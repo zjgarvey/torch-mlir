@@ -51,6 +51,11 @@ public:
 
     for (unsigned i : QuantInfo<SrcOp>::operandsToQuantize) {
       operands[i] = f(operands[i]);
+      auto type =
+          cast<ValueTensorType>(operands[i].getType()).getOptionalDtype();
+      if (!llvm::isa<QInt8Type, QUInt8Type, QInt32Type>(type))
+        return rewriter.notifyMatchFailure(
+            op, "unsupported: partially quantized operands");
     }
 
     if (!dequanted) {
