@@ -44,8 +44,13 @@ if(TORCH_MLIR_ENABLE_JIT_IR_IMPORTER OR TORCH_MLIR_ENABLE_LTC)
       message(FATAL_ERROR "Without TORCH_MLIR_USE_INSTALLED_PYTORCH, expected to find Torch configuration at ${Torch_DIR}, which does not exist")
     endif()
   endif()
+  #get libtorchvision
 
   find_package(Torch 1.11 REQUIRED)
+  message(STATUS "${PROJECT_SOURCE_DIR}")
+  set(TorchVision_DIR "/usr/local/lib")
+  message(STATUS "${TorchVision_DIR}...")
+  find_package(TorchVision REQUIRED)
 
   set(TORCHGEN_DIR ${Torch_ROOT}/../../../torchgen)
 
@@ -54,6 +59,7 @@ if(TORCH_MLIR_ENABLE_JIT_IR_IMPORTER OR TORCH_MLIR_ENABLE_LTC)
     ${Python3_INCLUDE_DIRS}
   )
   link_directories("${TORCH_INSTALL_PREFIX}/lib")
+  message(STATUS "Torch install prefix = ${TORCH_INSTALL_PREFIX}")
   message(STATUS "TORCH_CXXFLAGS is = ${TORCH_CXXFLAGS}")
   if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" AND NOT TORCH_CXXFLAGS)
     message(WARNING

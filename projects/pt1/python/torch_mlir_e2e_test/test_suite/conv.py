@@ -1256,3 +1256,55 @@ def ConvTranspose2DQInt8_basic(module, tu: TestUtils):
         tu.randint(Cin, Cout, Hker, Wker, low=-128, high=127).to(torch.int8),
         torch.rand(Cout),
     )
+
+import torchvision
+
+N = 1
+Cin = 1
+Hin = 7
+Win = 6
+Cout = 1
+Hker = 2
+Wker = 2
+offset_groups = 1
+Hout = 6
+Wout = 5
+offset_dim1 = 2*offset_groups*Hker*Wker
+
+class DeformableConvModule(torch.nn.Module):
+    @export
+    @annotate_args(
+        [
+            None,
+            ([N,Cin,Hin,Win], torch.float32, True),
+            ([N,offset_dim1,Hout,Wout], torch.float32, True),
+            ([Cout,Cin,Hker,Wker], torch.float32, True),
+        ]
+    )
+    def forward(self, input, offset, weight):
+        return torchvision.ops.deform_conv2d(input, offset, weight)
+    
+@register_test_case(module_factory=lambda : DeformableConvModule())
+def DeformConv2D_basic(module, tu: TestUtils):
+    input = tu.rand(N, Cin, Hin, Win)
+    offset = tu.rand(N, offset_dim1, Hout, Wout)
+    weight = tu.rand(Cout, Cin, Hker, Wker)
+    module.forward(input,offset,weight)
+
+class DetModule(torch.nn.Module):
+    @export
+    @annotate_args(
+        [
+            None,
+            ([2,10,10],torch.float32,True),
+        ]
+    )
+    def forward(self, input):
+        return torch.det(input)
+    
+@register_test_case(module_factory=lambda : DetModule())
+def DetModule_basic(module, tu : TestUtils):
+    input = tu.rand(2,10,10)
+    with torch.no_grad():
+        module.forward(input)
+    

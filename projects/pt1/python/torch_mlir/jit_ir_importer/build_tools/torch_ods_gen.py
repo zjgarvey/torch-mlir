@@ -1133,6 +1133,11 @@ def emit_ops(emitter_td: TextEmitter, registry: Registry):
         traits=["HasValueSemantics"],
     )
 
+    # ==========================================================================
+    # `torchvision::` namespace.
+    # ==========================================================================
+
+    emit("torchvision::deform_conv2d : (Tensor, Tensor, Tensor, Tensor, Tensor, int, int, int, int, int, int, int, int, bool) -> (Tensor)") 
 
 def dump_registered_ops(outfile: TextIO, registry: Registry):
     for _, v in sorted(registry.by_unique_key.items()):

@@ -12,6 +12,7 @@ add_dependencies(TorchMLIRJITIRImporterPybind
   )
 target_link_libraries(TorchMLIRJITIRImporterPybind
   ${TORCH_LIBRARIES}
+  TorchVision::TorchVision
   torch_python
   TorchMLIRJITIRImporter
   )

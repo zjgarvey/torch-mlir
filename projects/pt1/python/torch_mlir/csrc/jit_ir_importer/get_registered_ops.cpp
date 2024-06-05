@@ -10,6 +10,7 @@
 #include "get_registered_ops.h"
 
 #include <torch/csrc/jit/ir/ir.h>
+#include <torchvision/vision.h>
 
 namespace py = pybind11;
 
