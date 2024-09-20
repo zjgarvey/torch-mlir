@@ -1048,6 +1048,88 @@ void Aten_CastLongOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 // AtenViewOp
 //===----------------------------------------------------------------------===//
 
+void AtenViewOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *context) {
+  // Apply partial shape inference when only some dims are dynamic.
+  patterns.add(+[](AtenViewOp op, PatternRewriter &rewriter) {
+    BaseTensorType resultType = cast<BaseTensorType>(op.getType());
+    if (!resultType.hasSizes() || !resultType.hasDtype())
+      return failure();
+    ArrayRef<int64_t> resultSizes = resultType.getSizes();
+    SmallVector<Value> sizeListValues;
+    if (!getListConstructElements(op.getSize(), sizeListValues) || resultSizes.size() != sizeListValues.size())
+      return failure();
+    int64_t rank = resultSizes.size();
+    SmallVector<int64_t> inferredSizes;
+    bool missingSizeFound = false;
+    for (int64_t i=0; i<rank; i++) {
+      // if dim is dynamic, see if the prim list has a constant value to update
+      int64_t new_sze;
+      if (resultSizes[i] == Torch::kUnknownSize && matchPattern(sizeListValues[i], m_TorchConstantInt(&new_sze))) {
+        inferredSizes.push_back(new_sze);
+        missingSizeFound = true;
+        continue;
+      }
+      // no update possible or necessary, so leave the dim alone
+      inferredSizes.push_back(resultSizes[i]);
+    }
+    if (!missingSizeFound)
+      return failure();
+    auto inferredType = rewriter.getType<Torch::ValueTensorType>(inferredSizes, resultType.getDtype());
+    Value newView = rewriter.create<Torch::AtenViewOp>(op.getLoc(), inferredType, op.getSelf(), op.getSize());
+    rewriter.replaceOpWithNewOp<Torch::TensorStaticInfoCastOp>(op, resultType, newView);
+    return success();
+  });
+  // In the special case of <?,?,...,?,cst0*cst1*...> -> <?,?,...,?,cst0,cst1,...>, check the size list for size.int ops, 
+  patterns.add(+[](AtenViewOp op, PatternRewriter &rewriter) {
+    Value input = op.getSelf();
+    BaseTensorType inputType = cast<BaseTensorType>(input.getType());
+    BaseTensorType resultType = cast<BaseTensorType>(op.getType());
+    if (!resultType.hasSizes() || !inputType.hasSizes() || !resultType.hasDtype())
+      return failure();
+    ArrayRef<int64_t> inputSizes = inputType.getSizes();
+    ArrayRef<int64_t> resultSizes = resultType.getSizes();
+    int64_t inputRank = inputSizes.size();
+    int64_t resultRank = resultSizes.size();
+    if (resultRank <= inputRank)
+      return failure();
+    SmallVector<Value> sizeListValues;
+    if (!getListConstructElements(op.getSize(), sizeListValues) || resultSizes.size() != sizeListValues.size())
+      return failure();
+    int64_t j = 0;
+    for (int64_t i=0; i < inputRank; i++) {
+      bool isDyn = resultSizes[i] == Torch::kUnknownSize;
+      // pass through static dims that match
+      if (!isDyn && resultSizes[i] == inputSizes[i]) {
+        continue;
+      }
+      // pass through dynamic dims that match
+      auto szeOp = sizeListValues[i].getDefiningOp<AtenSizeIntOp>();
+      if (isDyn && szeOp) {
+        Value szeOpOperand = szeOp.getSelf();
+        Value szeOpDim = szeOp.getDim();
+        int64_t szeOpDimInt;
+        if (!matchPattern(szeOp.getDim(), m_TorchConstantInt(&szeOpDimInt)) || szeOpDimInt != i || szeOp.getSelf() != input){
+          return failure();
+        }
+        continue;
+      }
+      // This dim didn't match. Make sure it's the last dim. 
+      if (i != inputRank - 1)
+        return failure();
+      break;
+    }
+    // Include check for prod(remaining result dims) = inputShape.back()?
+    auto intListTy = rewriter.getType<Torch::ListType>(rewriter.getType<Torch::IntType>());
+    ArrayRef<Value> unflattenSizes(sizeListValues.begin()+inputRank-1, sizeListValues.end());
+    Value unflattenDim = rewriter.create<Torch::ConstantIntOp>(op.getLoc(), inputRank - 1);
+    Value unflattenSizeList = rewriter.create<Torch::PrimListConstructOp>(
+            op.getLoc(), intListTy, unflattenSizes);
+    rewriter.replaceOpWithNewOp<AtenUnflattenIntOp>(op, resultType, input, unflattenDim, unflattenSizeList);
+    return success();
+  });
+}
+
 OpFoldResult AtenViewOp::fold(FoldAdaptor adaptor) {
   auto inputType = dyn_cast<BaseTensorType>(getOperand(0).getType());
   if (!inputType || !inputType.hasSizes() || inputType.getSizes().size() != 1)

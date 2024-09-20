@@ -12079,6 +12079,7 @@ def Torch_AtenViewOp : Torch_Op<"aten.view", [
       printDefaultTorchOp(printer, *this, 2, 1);
     }
   }];
+  let hasCanonicalizer = 1;
   let hasFolder = 1;
 }
 
