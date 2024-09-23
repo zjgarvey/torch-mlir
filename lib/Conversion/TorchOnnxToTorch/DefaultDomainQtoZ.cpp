@@ -1660,8 +1660,19 @@ void mlir::torch::onnx_c::populateDefaultDomainQtoZ(
         int64_t inputRank = inputType.getSizes().size();
 
         if (inputRank == 0) {
-          rewriter.replaceOpWithNewOp<Torch::Aten_ShapeAsTensorOp>(
-              binder.op, resultType, operand);
+          auto nullShape = rewriter.getType<Torch::ValueTensorType>(
+              ArrayRef<int64_t>({0}), rewriter.getIntegerType(64, true));
+          Value shapeList =
+              createConstantIntList(binder, rewriter, ArrayRef<int64_t>({0}));
+          Value cstDtype = rewriter.create<Torch::ConstantIntOp>(
+              binder.getLoc(), /*torch dtype int64*/ 4);
+          Value cstNone =
+              rewriter.create<Torch::ConstantNoneOp>(binder.getLoc());
+          Value emptyOp = rewriter.create<Torch::AtenEmptyMemoryFormatOp>(
+              binder.getLoc(), nullShape, shapeList, cstDtype, cstNone, cstNone,
+              cstNone, cstNone);
+          rewriter.replaceOpWithNewOp<Torch::TensorStaticInfoCastOp>(
+              binder.op, resultType, emptyOp);
           return success();
         }
 
