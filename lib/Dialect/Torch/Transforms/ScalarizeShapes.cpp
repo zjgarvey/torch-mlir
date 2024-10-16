@@ -103,6 +103,31 @@ LogicalResult getListFromTensor(Value value, SmallVector<Value> &vals) {
     return success();
   }
 
+  if (auto unsqueeze = value.getDefiningOp<Torch::AtenUnsqueezeOp>()) {
+    Value usqSelf = unsqueeze.getSelf();
+    if (auto numToTensor =
+            usqSelf.getDefiningOp<Torch::PrimNumToTensorScalarOp>()) {
+      vals.resize(vals.size() + 1, numToTensor.getA());
+      return success();
+    }
+  }
+
+  if (auto broadcast = value.getDefiningOp<Torch::AtenBroadcastToOp>()) {
+    auto ty = cast<ValueTensorType>(broadcast.getType());
+    if (!ty.areAllSizesKnown() || ty.getSizes().size() != 1)
+      return failure();
+
+    if (ty.getSizes()[0] > kMaxFold)
+      return failure();
+
+    Value bSelf = broadcast.getSelf();
+    if (auto numToTensor =
+            bSelf.getDefiningOp<Torch::PrimNumToTensorScalarOp>()) {
+      vals.resize(vals.size() + ty.getSizes()[0], numToTensor.getA());
+      return success();
+    }
+  }
+
   return failure();
 }
 } // namespace
@@ -139,6 +164,30 @@ public:
         loc, rewriter.getBoolAttr(false));
     rewriter.replaceOpWithNewOp<Torch::AtenTensorOp>(
         op, op.getType(), dimList, cstNone, cstNone, cstFalse);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+class PropagateAtenMulTensorPattern : public OpRewritePattern<AtenMulTensorOp> {
+public:
+  using OpRewritePattern<AtenMulTensorOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenMulTensorOp op,
+                                PatternRewriter &rewriter) const override {
+    auto resultTy = cast<ValueTensorType>(op.getType());
+    if (!resultTy.hasDtype() || resultTy.getSizes().size() != 0 ||
+        !isa<Torch::IntType>(resultTy.getDtype()))
+      return failure();
+    Location loc = op.getLoc();
+    Value self =
+        rewriter.create<AtenItemOp>(loc, resultTy.getDtype(), op.getSelf());
+    Value other =
+        rewriter.create<AtenItemOp>(loc, resultTy.getDtype(), op.getOther());
+    Value scalarMul =
+        rewriter.create<AtenMulIntOp>(loc, resultTy.getDtype(), self, other);
+    rewriter.replaceOpWithNewOp<Torch::PrimNumToTensorScalarOp>(op, resultTy,
+                                                                scalarMul);
     return success();
   }
 };
@@ -309,10 +358,6 @@ public:
     auto loc = op.getLoc();
     ImplicitLocOpBuilder b(loc, rewriter);
 
-    SmallVector<Value> elements;
-    if (failed(getListFromTensor(op.getSelf(), elements)))
-      return failure();
-
     int64_t dim, start, end, step;
     if (!matchPattern(op.getDim(), m_TorchConstantInt(&dim)))
       return rewriter.notifyMatchFailure(op, "requires a constant dim");
@@ -336,17 +381,13 @@ public:
     // Correct for negative indexing:
     dim = dim < 0 ? dim + selfRank : dim;
 
-    int64_t dimLength = elements.size();
+    int64_t dimLength = selfShape[dim];
     start = start < 0 ? start + dimLength : start;
     end = end < 0 ? end + dimLength : end;
 
     start = start < 0 ? 0 : start;
     end = end < 0 ? 0 : end;
     end = end > dimLength ? dimLength : end;
-
-    if (selfShape[dim] != dimLength)
-      return rewriter.notifyMatchFailure(
-          op, "dim length does not match number of elements");
 
     for (int64_t i = 0; i < selfRank; ++i) {
       if (i == dim)
@@ -356,14 +397,39 @@ public:
                                            "expects unary non-dim dimension");
     }
 
+    SmallVector<Value> elements;
+    bool fromCatOp = false;
+    if (failed(getListFromTensor(op.getSelf(), elements))) {
+      auto catOp = op.getSelf().getDefiningOp<AtenCatOp>();
+      if (!catOp || failed(getListOperands(catOp.getTensors(), elements)))
+        return failure();
+      auto expectedType = rewriter.getType<Torch::ValueTensorType>(
+          ArrayRef<int64_t>({1}), selfTy.getDtype());
+      for (auto v : elements) {
+        if (dyn_cast<ValueTensorType>(v.getType()) != expectedType)
+          return failure();
+      }
+      fromCatOp = true;
+    }
+
+    if (selfShape[dim] != elements.size())
+      return rewriter.notifyMatchFailure(
+          op, "dim length does not match number of elements");
+
     SmallVector<Value> selected;
     for (int i = start; i < end; i += step)
       selected.push_back(elements[i]);
 
+    if (fromCatOp && selected.size() != 1)
+      return failure();
+    if (fromCatOp) {
+      rewriter.replaceOp(op, selected[0]);
+      return success();
+    }
+
     auto eTy = elements.front().getType();
     auto dimList = rewriter.create<Torch::PrimListConstructOp>(
         loc, rewriter.getType<Torch::ListType>(eTy), selected);
-
     Value cstNone = rewriter.create<Torch::ConstantNoneOp>(loc);
     Value cstFalse = rewriter.create<Torch::ConstantBoolOp>(
         loc, rewriter.getBoolAttr(false));
@@ -712,6 +778,48 @@ public:
 } // namespace
 
 namespace {
+class FoldAtenEqIntPattern : public OpRewritePattern<AtenEqIntOp> {
+public:
+  using OpRewritePattern<AtenEqIntOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenEqIntOp op,
+                                PatternRewriter &rewriter) const override {
+    // stronger fold pattern
+    auto uses = op->getUses();
+    if (op->hasOneUse() &&
+        isa<Torch::RuntimeAssertOp>(uses.begin()->getOwner()))
+      return failure();
+    int64_t otherInt;
+    if (!matchPattern(op.getB(), m_TorchConstantInt(&otherInt)) ||
+        otherInt != 0)
+      return failure();
+
+    if (auto mulOp = op.getA().getDefiningOp<AtenMulIntOp>()) {
+      Value self = mulOp.getA();
+      Value other = mulOp.getB();
+      Value selfEq = rewriter.create<AtenEqIntOp>(op.getLoc(), self, op.getB());
+      Value otherEq =
+          rewriter.create<AtenEqIntOp>(op.getLoc(), other, op.getB());
+      rewriter.replaceOpWithNewOp<Aten__Or__BoolOp>(op, selfEq, otherEq);
+      return success();
+    }
+
+    if (auto sizeOp = op.getA().getDefiningOp<AtenSizeIntOp>()) {
+      Value selfGtOther = rewriter.create<AtenGtIntOp>(
+          op.getLoc(), op.getType(), op.getA(), op.getB());
+      rewriter.create<Torch::RuntimeAssertOp>(
+          op.getLoc(), selfGtOther,
+          rewriter.getStringAttr("Expected dim size != 0."));
+      Value cstFalse =
+          rewriter.create<Torch::ConstantBoolOp>(op.getLoc(), false);
+      rewriter.replaceOp(op, cstFalse);
+      return success();
+    }
+
+    return failure();
+  }
+};
+} // namespace
+namespace {
 class FoldAtenUnsqueezePattern : public OpRewritePattern<AtenUnsqueezeOp> {
 public:
   using OpRewritePattern<AtenUnsqueezeOp>::OpRewritePattern;
@@ -904,7 +1012,8 @@ public:
                     FoldAtenSqueezePattern, FoldAtenUnsqueezePattern,
                     FoldAtenWhereSelf, CanonicalizeAtenViewPattern,
                     PropagateAtenEqTensorPattern, PropagateAtenWhereSelfPattern,
-                    FoldAtenSqueezeDimPattern,
+                    FoldAtenSqueezeDimPattern, FoldAtenEqIntPattern,
+                    PropagateAtenMulTensorPattern,
                     RemoveUnusedPattern<Torch::AtenIntBoolOp>,
                     RemoveUnusedPattern<Torch::AtenEqIntOp>,
                     RemoveUnusedPattern<Torch::PrimNumToTensorScalarOp>,
