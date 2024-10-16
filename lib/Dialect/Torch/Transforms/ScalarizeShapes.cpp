@@ -176,18 +176,84 @@ public:
   LogicalResult matchAndRewrite(AtenMulTensorOp op,
                                 PatternRewriter &rewriter) const override {
     auto resultTy = cast<ValueTensorType>(op.getType());
-    if (!resultTy.hasDtype() || resultTy.getSizes().size() != 0 ||
-        !isa<Torch::IntType>(resultTy.getDtype()))
-      return failure();
+    if (!resultTy.hasDtype())
+      return rewriter.notifyMatchFailure(op, "no dtype");
+    if (resultTy.getSizes().size() != 0)
+      return rewriter.notifyMatchFailure(op, "not rank 0");
+    if (!isa<Torch::IntType>(resultTy.getDtype()) &&
+        !isa<mlir::IntegerType>(resultTy.getDtype()))
+      return rewriter.notifyMatchFailure(op, "not an int type");
     Location loc = op.getLoc();
-    Value self =
-        rewriter.create<AtenItemOp>(loc, resultTy.getDtype(), op.getSelf());
-    Value other =
-        rewriter.create<AtenItemOp>(loc, resultTy.getDtype(), op.getOther());
-    Value scalarMul =
-        rewriter.create<AtenMulIntOp>(loc, resultTy.getDtype(), self, other);
+    Value self = rewriter.create<AtenItemOp>(
+        loc, rewriter.getType<Torch::IntType>(), op.getSelf());
+    Value other = rewriter.create<AtenItemOp>(
+        loc, rewriter.getType<Torch::IntType>(), op.getOther());
+    Value scalarMul = rewriter.create<AtenMulIntOp>(
+        loc, rewriter.getType<Torch::IntType>(), self, other);
     rewriter.replaceOpWithNewOp<Torch::PrimNumToTensorScalarOp>(op, resultTy,
                                                                 scalarMul);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+class PropagateAtenAddTensorPattern : public OpRewritePattern<AtenAddTensorOp> {
+public:
+  using OpRewritePattern<AtenAddTensorOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenAddTensorOp op,
+                                PatternRewriter &rewriter) const override {
+    auto resultTy = cast<ValueTensorType>(op.getType());
+    if (!resultTy.hasDtype())
+      return rewriter.notifyMatchFailure(op, "no dtype");
+    if (resultTy.getSizes().size() != 0)
+      return rewriter.notifyMatchFailure(op, "not rank 0");
+    if (!isa<Torch::IntType>(resultTy.getDtype()) &&
+        !isa<mlir::IntegerType>(resultTy.getDtype()))
+      return rewriter.notifyMatchFailure(op, "not an int type");
+    int64_t alpha;
+    if (!matchPattern(op.getAlpha(), m_TorchConstantInt(&alpha)) || alpha != 1)
+      return rewriter.notifyMatchFailure(op, "alpha must be 1");
+    Location loc = op.getLoc();
+    Value self = rewriter.create<AtenItemOp>(
+        loc, rewriter.getType<Torch::IntType>(), op.getSelf());
+    Value other = rewriter.create<AtenItemOp>(
+        loc, rewriter.getType<Torch::IntType>(), op.getOther());
+    Value scalarAdd = rewriter.create<AtenAddIntOp>(
+        loc, rewriter.getType<Torch::IntType>(), self, other);
+    rewriter.replaceOpWithNewOp<Torch::PrimNumToTensorScalarOp>(op, resultTy,
+                                                                scalarAdd);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+class PropagateAtenSubTensorPattern : public OpRewritePattern<AtenSubTensorOp> {
+public:
+  using OpRewritePattern<AtenSubTensorOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenSubTensorOp op,
+                                PatternRewriter &rewriter) const override {
+    auto resultTy = cast<ValueTensorType>(op.getType());
+    if (!resultTy.hasDtype())
+      return rewriter.notifyMatchFailure(op, "no dtype");
+    if (resultTy.getSizes().size() != 0)
+      return rewriter.notifyMatchFailure(op, "not rank 0");
+    if (!isa<Torch::IntType>(resultTy.getDtype()) &&
+        !isa<mlir::IntegerType>(resultTy.getDtype()))
+      return rewriter.notifyMatchFailure(op, "not an int type");
+    int64_t alpha;
+    if (!matchPattern(op.getAlpha(), m_TorchConstantInt(&alpha)) || alpha != 1)
+      return rewriter.notifyMatchFailure(op, "alpha must be 1");
+    Location loc = op.getLoc();
+    Value self = rewriter.create<AtenItemOp>(
+        loc, rewriter.getType<Torch::IntType>(), op.getSelf());
+    Value other = rewriter.create<AtenItemOp>(
+        loc, rewriter.getType<Torch::IntType>(), op.getOther());
+    Value scalarSub = rewriter.create<AtenSubIntOp>(
+        loc, rewriter.getType<Torch::IntType>(), self, other);
+    rewriter.replaceOpWithNewOp<Torch::PrimNumToTensorScalarOp>(op, resultTy,
+                                                                scalarSub);
     return success();
   }
 };
@@ -358,6 +424,25 @@ public:
     auto loc = op.getLoc();
     ImplicitLocOpBuilder b(loc, rewriter);
 
+    auto selfTy = cast<BaseTensorType>(op.getSelf().getType());
+    auto selfShape = selfTy.getSizes();
+    int64_t selfRank = selfShape.size();
+
+    SmallVector<Value> elements;
+    bool fromCatOp = false;
+    if (failed(getListFromTensor(op.getSelf(), elements))) {
+      auto catOp = op.getSelf().getDefiningOp<AtenCatOp>();
+      if (!catOp || failed(getListOperands(catOp.getTensors(), elements)))
+        return failure();
+      auto expectedType = rewriter.getType<Torch::ValueTensorType>(
+          ArrayRef<int64_t>({1}), selfTy.getDtype());
+      for (auto v : elements) {
+        if (dyn_cast<ValueTensorType>(v.getType()) != expectedType)
+          return failure();
+      }
+      fromCatOp = true;
+    }
+
     int64_t dim, start, end, step;
     if (!matchPattern(op.getDim(), m_TorchConstantInt(&dim)))
       return rewriter.notifyMatchFailure(op, "requires a constant dim");
@@ -374,10 +459,6 @@ public:
     if (step < 0)
       return rewriter.notifyMatchFailure(op, "requires a positive step value");
 
-    auto selfTy = cast<BaseTensorType>(op.getSelf().getType());
-    auto selfShape = selfTy.getSizes();
-    int64_t selfRank = selfShape.size();
-
     // Correct for negative indexing:
     dim = dim < 0 ? dim + selfRank : dim;
 
@@ -392,24 +473,9 @@ public:
     for (int64_t i = 0; i < selfRank; ++i) {
       if (i == dim)
         continue;
-      if (selfShape[i] != 1)
+      if (!fromCatOp && selfShape[i] != 1)
         return rewriter.notifyMatchFailure(op,
                                            "expects unary non-dim dimension");
-    }
-
-    SmallVector<Value> elements;
-    bool fromCatOp = false;
-    if (failed(getListFromTensor(op.getSelf(), elements))) {
-      auto catOp = op.getSelf().getDefiningOp<AtenCatOp>();
-      if (!catOp || failed(getListOperands(catOp.getTensors(), elements)))
-        return failure();
-      auto expectedType = rewriter.getType<Torch::ValueTensorType>(
-          ArrayRef<int64_t>({1}), selfTy.getDtype());
-      for (auto v : elements) {
-        if (dyn_cast<ValueTensorType>(v.getType()) != expectedType)
-          return failure();
-      }
-      fromCatOp = true;
     }
 
     if (selfShape[dim] != elements.size())
@@ -511,8 +577,10 @@ public:
     auto rank0BoolTy = rewriter.getType<Torch::ValueTensorType>(
         ArrayRef<int64_t>({}), conditionTy.getDtype());
     for (uint64_t i = 0; i < selfList.size(); i++) {
+      Value condInt = rewriter.create<Torch::AtenIntBoolOp>(
+          loc, rewriter.getType<Torch::IntType>(), conditionList[i]);
       Value rank0Cond = rewriter.create<Torch::PrimNumToTensorScalarOp>(
-          loc, rank0BoolTy, conditionList[i]);
+          loc, rank0BoolTy, condInt);
       Value rank0Self = rewriter.create<Torch::PrimNumToTensorScalarOp>(
           loc, rank0IntTy, selfList[i]);
       Value rank0Other = rewriter.create<Torch::PrimNumToTensorScalarOp>(
@@ -579,15 +647,17 @@ public:
     auto otherLiteral = other.getDefiningOp<Torch::ValueTensorLiteralOp>();
     if (succeeded(selfFromList) && otherLiteral &&
         failed(constructListFromLiteral(rewriter, otherLiteral, otherList)))
-      return failure();
+      return rewriter.notifyMatchFailure(
+          op, "other unable to construct list from literal");
     if (succeeded(otherFromList) && selfLiteral &&
         failed(constructListFromLiteral(rewriter, selfLiteral, selfList)))
-      return failure();
+      return rewriter.notifyMatchFailure(
+          op, "self unable to construct list from literal");
     if ((int64_t)selfList.size() != selfSize ||
         (int64_t)otherList.size() != otherSize)
       // this should only occur if we did not generate IR with
       // constructListFromLiteral
-      return failure();
+      return rewriter.notifyMatchFailure(op, "size mismatch");
 
     SmallVector<Value> eqVals;
     for (uint64_t i = 0; i < selfList.size(); i++) {
@@ -1006,27 +1076,28 @@ public:
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
-    patterns.insert<PropagateAtenCatPattern, PropagateAtenIndexSelectPattern,
-                    PropagateAtenItemPattern, PropagateAtenShapeToTensorPattern,
-                    PropagateAtenSliceTensorPattern, FoldAtenTensorSplatPattern,
-                    FoldAtenSqueezePattern, FoldAtenUnsqueezePattern,
-                    FoldAtenWhereSelf, CanonicalizeAtenViewPattern,
-                    PropagateAtenEqTensorPattern, PropagateAtenWhereSelfPattern,
-                    FoldAtenSqueezeDimPattern, FoldAtenEqIntPattern,
-                    PropagateAtenMulTensorPattern,
-                    RemoveUnusedPattern<Torch::AtenIntBoolOp>,
-                    RemoveUnusedPattern<Torch::AtenEqIntOp>,
-                    RemoveUnusedPattern<Torch::PrimNumToTensorScalarOp>,
-                    RemoveUnusedPattern<Torch::AtenFullOp>,
-                    RemoveUnusedPattern<Torch::AtenUnsqueezeOp>,
-                    RemoveUnusedPattern<Torch::AtenSqueezeDimOp>,
-                    RemoveUnusedPattern<Torch::AtenSizeIntOp>,
-                    RemoveUnusedPattern<Torch::AtenSliceTensorOp>,
-                    RemoveUnusedPattern<Torch::AtenTensorOp>,
-                    RemoveUnusedPattern<Torch::ConstantBoolOp>,
-                    RemoveUnusedPattern<Torch::ConstantIntOp>,
-                    RemoveUnusedPattern<Torch::ConstantNoneOp>,
-                    RemoveUnusedPattern<Torch::PrimListConstructOp>>(context);
+    patterns.insert<
+        PropagateAtenCatPattern, PropagateAtenIndexSelectPattern,
+        PropagateAtenItemPattern, PropagateAtenShapeToTensorPattern,
+        PropagateAtenSliceTensorPattern, FoldAtenTensorSplatPattern,
+        FoldAtenSqueezePattern, FoldAtenUnsqueezePattern, FoldAtenWhereSelf,
+        CanonicalizeAtenViewPattern, PropagateAtenEqTensorPattern,
+        PropagateAtenWhereSelfPattern, FoldAtenSqueezeDimPattern,
+        FoldAtenEqIntPattern, PropagateAtenMulTensorPattern,
+        PropagateAtenAddTensorPattern, PropagateAtenSubTensorPattern,
+        RemoveUnusedPattern<Torch::AtenIntBoolOp>,
+        RemoveUnusedPattern<Torch::AtenEqIntOp>,
+        RemoveUnusedPattern<Torch::PrimNumToTensorScalarOp>,
+        RemoveUnusedPattern<Torch::AtenFullOp>,
+        RemoveUnusedPattern<Torch::AtenUnsqueezeOp>,
+        RemoveUnusedPattern<Torch::AtenSqueezeDimOp>,
+        RemoveUnusedPattern<Torch::AtenSizeIntOp>,
+        RemoveUnusedPattern<Torch::AtenSliceTensorOp>,
+        RemoveUnusedPattern<Torch::AtenTensorOp>,
+        RemoveUnusedPattern<Torch::ConstantBoolOp>,
+        RemoveUnusedPattern<Torch::ConstantIntOp>,
+        RemoveUnusedPattern<Torch::ConstantNoneOp>,
+        RemoveUnusedPattern<Torch::PrimListConstructOp>>(context);
 
     context->getLoadedDialect<mlir::arith::ArithDialect>()
         ->getCanonicalizationPatterns(patterns);
