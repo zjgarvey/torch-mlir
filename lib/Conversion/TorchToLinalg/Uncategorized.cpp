@@ -3623,6 +3623,7 @@ public:
                                   rewriter.getStringAttr(assertMessage));
 
     rewriter.eraseOp(op);
+    return success();
   }
 };
 } // namespace
