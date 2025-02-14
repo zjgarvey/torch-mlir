@@ -1029,21 +1029,22 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
   if (auto pow = dyn_cast<AtenPowTensorTensorOp>(op)) {
     Type dtype = cast<RankedTensorType>(converter->convertType(pow.getType()))
                      .getElementType();
-    if (!isa<mlir::FloatType>(dtype)) {
-      // The result type is integer when both operands are integer.
-      // Torch then uses the following implementation:
-      // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/Pow.h
-      pow.emitError("unimplemented: non-floating point dtype");
-      return nullptr;
-    }
     Type powType = dtype;
-    if (payloadArgs[0].getType().isInteger() ||
-        payloadArgs[1].getType().isInteger())
-      powType = mlir::Float64Type::get(op->getContext());
+    bool isIntResult = dtype.isInteger();
+    bool isIntBase = payloadArgs[0].getType().isInteger();
+    bool isIntExp = payloadArgs[1].getType().isInteger();
+    // always upcast base to result type
     Value lhs = convertScalarToDtype(b, loc, payloadArgs[0], powType);
-    Value rhs = convertScalarToDtype(b, loc, payloadArgs[1], powType);
-    auto powOp = b.create<math::PowFOp>(loc, lhs, rhs);
-    return convertScalarToDtype(b, loc, powOp, dtype);
+    // if exponent is int and result is float, don't upcast (use math.fpowi)
+    Value rhs = (isIntExp && !isIntResult)
+                    ? payloadArgs[1]
+                    : convertScalarToDtype(b, loc, payloadArgs[1], powType);
+    if (isIntBase && isIntExp)
+      return b.create<math::IPowIOp>(loc, lhs, rhs);
+    if (!isIntBase && isIntExp)
+      return b.create<math::FPowIOp>(loc, lhs, rhs);
+    // all other cases have both operands upcasted to output dtype:
+    return b.create<math::PowFOp>(loc, lhs, rhs);
   }
 
   if (auto imag = dyn_cast<AtenImagOp>(op)) {

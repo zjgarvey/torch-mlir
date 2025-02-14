@@ -3047,7 +3047,11 @@ void mlir::torch::onnx_c::populateDefaultDomainGtoP(
         Value none = rewriter.create<Torch::ConstantNoneOp>(loc);
 
         auto powType = resultType;
-        if (isa<IntegerType>(resultType.getDtype())) {
+        auto rhsType = cast<Torch::ValueTensorType>(rhs.getType());
+        // The only case that needs conversion to float is (int ^ float -> int)
+        bool convertToF64 = !isa<IntegerType>(rhsType.getDtype()) &&
+                            isa<IntegerType>(resultType.getDtype());
+        if (convertToF64) {
           powType = rewriter.getType<Torch::ValueTensorType>(
               resultType.getSizes(), rewriter.getF64Type());
         }
@@ -3055,11 +3059,12 @@ void mlir::torch::onnx_c::populateDefaultDomainGtoP(
         Value pow = rewriter.create<Torch::AtenPowTensorTensorOp>(loc, powType,
                                                                   lhs, rhs);
 
-        if (!isa<IntegerType>(resultType.getDtype())) {
+        if (!convertToF64) {
           rewriter.replaceOp(binder.op, pow);
           return success();
         }
 
+        // convert back to int
         auto outDtype = Torch::getScalarTypeForType(resultType.getDtype());
         auto outTyConst = rewriter.create<Torch::ConstantIntOp>(
             binder.getLoc(), rewriter.getType<Torch::IntType>(),
