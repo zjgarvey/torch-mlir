@@ -5973,6 +5973,10 @@ ParseResult OnnxVariantRotaryEmbeddingOp::parse(OpAsmParser &parser,
     return failure();
   }
 
+  // Parse result type list.
+  if (parser.parseArrowTypeList(result.types))
+    return failure();
+
   return success();
 }
 
